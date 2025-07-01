@@ -16,6 +16,10 @@ from langchain.chains.llm import LLMChain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time
+from applogger import Logger
+from fpdf import FPDF
+
+log = Logger().getLogger(__name__)
 
 
 llm = ChatOpenAI(model_name="o4-mini-2025-04-16")
@@ -24,7 +28,7 @@ llm = ChatOpenAI(model_name="o4-mini-2025-04-16")
 #llm = ChatGroq(model="Gemma2-9b-It")
 
 TAVILY_API_KEY=os.getenv("TAVILY_API_KEY")
-search_tool=TavilySearchResults(tavily_api_key=TAVILY_API_KEY)
+search_tool=TavilySearchResults(tavily_api_key=TAVILY_API_KEY,max_results=5)
 
 @tool
 def summary_tool(content: str) :
@@ -53,10 +57,13 @@ def pdf_or_docx_generator_tool(content: str):
     
     docs_name = f'multi_agent_output_{current_time_milliseconds}.docx'
     pdf_name = f'multi_agent_output_{current_time_milliseconds}.pdf'
-    #with open(docs_name, "w") as f:
-    #    f.write(content)
-    with open(pdf_name, "w") as f:
-        f.write(content)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font('helvetica', size=12)
+    pdf.multi_cell(190, 10, txt=content, align="L")
+    pdf.output(pdf_name)
+    
     return "Content written successfully"
 
 class AgentState(MessagesState):
@@ -82,9 +89,9 @@ You are a supervisor, tasked with managing a allocating a work between the follo
     2. Based on 1, please allocate to teams {members} accordingly
     3. researcher team has following 2 teams {research_team}. If user request is medical related, please respond with 'medical_researcher'. 
     If user request is pharma related, please respond with 'finance_researcher'.
-    if you get the response from one of the team, respond with RESEARCH_DONE
+    if you get the response from one of the team, respond with RESEARCH_DONE using "research_next"
     4. Once the research is done, generate a report using reporting team 
-    5. Reporting team has 2 teams {report_team} and it needs to be executed sequentially. First the summary has to be created and document needs to be generated. please respond with next accordingly.
+    5. Reporting team has 2 teams {report_team} and it needs to be executed sequentially. First the summary has to be created and document needs to be generated. please respond with "report_next" accordingly.
     6. once the summary and doc is generated, respond with REPORT_DONE
     When all tasks are finished, respond with FINISH.
 """
@@ -99,8 +106,8 @@ def supervisor(state : AgentState) -> Command[Literal["researcher", "reporter", 
     llm_with_structure_output_router =llm.with_structured_output(Router)
     response = llm_with_structure_output_router.invoke(messages)
     goto = response["next"]
-    print("**********BELOW IS MY GOTO from supervisor ***************")
-    print(goto)    
+    log.info("**********BELOW IS MY GOTO from supervisor ***************")
+    log.info(goto)    
     if goto == "FINISH":
         goto = END
     return Command(goto=goto, update={"next":goto})
@@ -119,8 +126,8 @@ def researcher(state: AgentState) -> Command[Literal["medical_researcher","finan
     llm_with_structure_output_researcher = llm.with_structured_output(ResearcherRouter)
     response = llm_with_structure_output_researcher.invoke(messages)
     goto = response["research_next"]
-    print("**********BELOW IS MY GOTO from Researcher ***************")
-    print(goto)    
+    log.info("**********BELOW IS MY GOTO from Researcher ***************")
+    log.info(goto)    
     if goto == "RESEARCH_DONE":
         return Command(
             update={
@@ -136,10 +143,10 @@ def researcher(state: AgentState) -> Command[Literal["medical_researcher","finan
 
 
 def medical_researcher(state: AgentState) -> Command[Literal["researcher"]] :
-    print('I am in medical researcher node ..Trying to get the Result')
+    log.info('I am in medical researcher node ..Trying to get the Result')
     medical_research_agent = create_react_agent(llm, tools=[search_tool], prompt="You are a medical researcher")
     medical_result =  medical_research_agent.invoke(state)
-    print(f'Medical result {medical_result}')
+    log.info(f'Medical result {medical_result}')
     return Command(
         update={
             "messages": [
@@ -150,10 +157,10 @@ def medical_researcher(state: AgentState) -> Command[Literal["researcher"]] :
     )
 
 def finance_researcher(state: AgentState) -> Command[Literal["researcher"]] :
-    print('I am in Finance researcher node ..Trying to get the Result')
+    log.info('I am in Finance researcher node ..Trying to get the Result')
     finance_research_agent = create_react_agent(llm, tools=[search_tool], prompt="You are a finance researcher")
     finance_result=finance_research_agent.invoke(state)
-    print(f'Finance result {finance_result}')
+    log.info(f'Finance result {finance_result}')
     return Command(
         update={
             "messages": [
@@ -168,8 +175,8 @@ def reporter(state: AgentState) -> Command[Literal["summarizer", "doc_generator"
     messages = state["messages"]
     
     if messages[-1].name == 'summarizer':
-        print("**********BELOW IS MY GOTO from Reporter ***************")
-        print("doc_generator")
+        log.info("**********BELOW IS MY GOTO from Reporter ***************")
+        log.info("doc_generator")
         return Command(
             update={
                 "messages": [
@@ -180,8 +187,8 @@ def reporter(state: AgentState) -> Command[Literal["summarizer", "doc_generator"
         )
     
     if messages[-1].name == 'doc_generator':
-        print("**********BELOW IS MY GOTO from Reporter ***************")
-        print("END")
+        log.info("**********BELOW IS MY GOTO from Reporter ***************")
+        log.info("END")
         return Command(
             update={
                 "messages": [
@@ -194,8 +201,8 @@ def reporter(state: AgentState) -> Command[Literal["summarizer", "doc_generator"
     reporter_response = llm_with_structure_output_reporter.invoke(messages)
 
     goto = reporter_response["report_next"]
-    print("**********BELOW IS MY GOTO from Reporter ***************")
-    print(goto)
+    log.info("**********BELOW IS MY GOTO from Reporter ***************")
+    log.info(goto)
     if goto == "REPORT_DONE":
         return Command(
             update={
@@ -213,8 +220,8 @@ def summarizer(state: AgentState) -> Command[Literal["reporter"]] :
     summary_response = summary_agent.invoke({"messages": [{"role":"user","content":state['messages'][-1].content}]})
     
     summary = summary_response['messages'][-1].content
-    print("**********BELOW IS MY GOTO from summarizer ***************")
-    print("reporter")
+    log.info("**********BELOW IS MY GOTO from summarizer ***************")
+    log.info("reporter")
     return Command(
         update={
             "messages": [
@@ -229,8 +236,8 @@ def doc_generator(state: AgentState) -> Command[Literal["reporter"]]:
     doc_agent = create_react_agent(llm,tools=[pdf_or_docx_generator_tool], prompt="Generate a report in pdf or docx format")
     doc_response = doc_agent.invoke({"messages": [{"role":"user","content" : state['messages'][-1].content}]})
 
-    print("**********BELOW IS MY GOTO from doc_generator ***************")
-    print("reporter")
+    log.info("**********BELOW IS MY GOTO from doc_generator ***************")
+    log.info("reporter")
     return Command(
         update={
             "messages": [
@@ -239,6 +246,7 @@ def doc_generator(state: AgentState) -> Command[Literal["reporter"]]:
         },
         goto="reporter",
     )
+
 
 research_graph = StateGraph(AgentState)
 report_graph = StateGraph(AgentState)
@@ -281,14 +289,17 @@ save_graph("app.png",app_png)
 save_graph("research.png",research_png)
 save_graph("report.png",report_png)
 
-#response = app.invoke({'messages':['What Precaution needs to be done for Flu in Adults ? ']})
-#response = app.invoke({'messages':['How to invest in stock markets ']})
-response = app.invoke({'messages':['how to open a demat account ? ']}, {"recursion_limit": 10})
+
+try:
+    #response = app.invoke({'messages':['What Precaution needs to be done for Flu in Adults ? ']})
+    #response = app.invoke({'messages':['How to invest in stock markets ']})
+
+    message = 'how to open a demat account ?'
+    log.info('--------------------------------START WORKFLOW ------------------')
+    response = app.invoke({'messages':[message]}, {"recursion_limit": 10})
+    log.info('Final Response ===========>')
+    log.info(response)
+    log.info('--------------------------------END WORKFLOW ------------------')
+except Exception as e:
+    log.error(e)
 #response = app.invoke({'messages':['What happens if vitamin D is less in adults ']})
-
-
-
-
-
-
-
